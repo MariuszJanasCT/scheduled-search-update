@@ -4,6 +4,7 @@ import CustomError from '../errors/custom.error';
 import { logger } from '../utils/logger.utils';
 import { allOrders } from '../orders/fetch.orders';
 import { fetchProductsUpdatedSince } from '../products/fetch.products';
+import { readConfiguration } from '../utils/config.utils';
 
 /**
  * Exposed job endpoint.
@@ -16,7 +17,7 @@ export const post = async (_request: Request, response: Response) => {
   try {
     // Get the orders
     const limitedOrdersObject = await fetchProductsUpdatedSince(
-      _request.app.locals.storeKey
+      readConfiguration().storeKey
     );
     logger.info(`Exported ${limitedOrdersObject.length} products!`);
 
