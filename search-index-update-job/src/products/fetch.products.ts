@@ -1,121 +1,107 @@
-import {
-  ProductProjection,
-  ProductProjectionPagedQueryResponse,
-} from '@commercetools/platform-sdk';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { ProductProjection } from '@commercetools/platform-sdk';
 
 import { createApiRoot as apiRoot } from '../client/create.client';
 import { logger } from '../utils/logger.utils';
 
-export async function fetchProductsUpdatedSince(
-  storeKey: string
-): Promise<ProductProjection[]> {
-  const pageSize = 16;
-  const updatedProductProjections: ProductProjection[] = [];
+export async function fetchRecentlyUpdatedProductsAcrossStores(): Promise<
+  Object[]
+> {
+  type StoreProductRecord = {
+    productId: string;
+    storeKey: string;
+    projection: ProductProjection;
+  };
 
-  let hasMorePages = true;
-  let lastFetchedProductId: string | undefined = undefined;
+  const results: StoreProductRecord[] = [];
+  const pageSize = 20;
 
-  // Step 1: Fetch the last sync timestamp from the custom object
-  let since: string = '1970-01-01T00:00:00Z'; // fallback if no custom object exists
+  // ⏱️ Adjustable delta window (in minutes)
+  const deltaMinutes = 10;
 
-  try {
-    const customObjectResponse = await apiRoot()
-      .customObjects()
-      .withContainerAndKey({
-        container: `${storeKey}_product_sync`,
-        key: 'last_sync',
-      })
-      .get()
+  // Calculate the time window
+  const now = new Date();
+  const from = new Date(now.getTime() - deltaMinutes * 60 * 1000);
+  const fromTimestamp = from.toISOString();
+  const toTimestamp = now.toISOString();
+
+  let hasMore = true;
+  let lastModifiedAtCursor = fromTimestamp;
+  let lastIdCursor = '';
+
+  const updatedProductIds: string[] = [];
+
+  // Step 1: Fetch product IDs modified within the time window using GraphQL
+  while (hasMore) {
+    const whereClause = `
+      where: "lastModifiedAt >= \\"${lastModifiedAtCursor}\\" AND lastModifiedAt <= \\"${toTimestamp}\\""
+    `;
+
+    const query = `
+      query {
+        products(limit: ${pageSize}, sort: ["lastModifiedAt asc", "id asc"], ${whereClause}) {
+          results {
+            id
+            lastModifiedAt
+          }
+        }
+      }
+    `;
+
+    const response = await apiRoot()
+      .graphql()
+      .post({ body: { query } })
       .execute();
 
-    since = customObjectResponse.body.value.syncedAt;
+    const products = response.body.data.products.results;
 
-    logger.log({
-      level: 'info',
-      message: `🔄 Performing delta sync since: ${since}`,
-    });
-  } catch (err: any) {
-    logger.error(
-      err,
-      'Failed to read last sync timestamp. Perform full sync first'
-    );
-    return [];
+    if (!products.length) break;
+
+    for (const product of products) {
+      updatedProductIds.push(product.id);
+    }
+
+    const lastProduct = products[products.length - 1];
+    lastModifiedAtCursor = lastProduct.lastModifiedAt;
+    lastIdCursor = lastProduct.id;
+
+    hasMore = products.length === pageSize;
   }
 
-  // Step 2: Scan through product assignments and fetch only updated projections
-  while (hasMorePages) {
-    const queryArgs: any = {
-      limit: pageSize,
-      withTotal: false,
-      sort: ['product.id asc'],
-      ...(lastFetchedProductId && {
-        where: [`product(id > "${lastFetchedProductId}")`],
-      }),
-    };
+  // Step 2: Get all store keys
+  const storeResponse = await apiRoot()
+    .stores()
+    .get({ queryArgs: { limit: 500 } })
+    .execute();
 
-    try {
-      const assignmentResponse = await apiRoot()
-        .inStoreKeyWithStoreKeyValue({ storeKey })
-        .productSelectionAssignments()
-        .get({ queryArgs })
-        .execute();
+  const storeKeys = storeResponse.body.results.map((store) => store.key);
 
-      const assignedProductIds = assignmentResponse.body.results.map(
-        (assignment) => assignment.product.id
-      );
+  // Step 3: Fetch projections for updated products in available stores
+  for (const productId of updatedProductIds) {
+    for (const storeKey of storeKeys) {
+      try {
+        const result = await apiRoot()
+          .inStoreKeyWithStoreKeyValue({ storeKey })
+          .productProjections()
+          .withId({ ID: productId })
+          .get()
+          .execute();
 
-      if (assignedProductIds.length > 0) {
-        lastFetchedProductId =
-          assignedProductIds[assignedProductIds.length - 1];
-      }
-
-      for (const productId of assignedProductIds) {
-        try {
-          const projectionResponse = await apiRoot()
-            .inStoreKeyWithStoreKeyValue({ storeKey })
-            .productProjections()
-            .withId({ ID: productId })
-            .get()
-            .execute();
-
-          const projection = projectionResponse.body;
-
-          if (projection.lastModifiedAt > since) {
-            updatedProductProjections.push(projection);
-          }
-        } catch (err) {
-          logger.error(
-            `Failed to fetch product projection for ID: ${productId}`
+        results.push({
+          productId,
+          storeKey,
+          projection: result.body,
+        });
+      } catch (error: any) {
+        if (error.statusCode !== 404) {
+          console.error(
+            `Error checking product ${productId} in store ${storeKey}`,
+            error
           );
         }
       }
-
-      hasMorePages = assignedProductIds.length === pageSize;
-    } catch (err) {
-      logger.error('Failed to fetch product assignments');
-      hasMorePages = false;
     }
   }
 
-  // Step 3: Update the custom object with the new timestamp
-  const now = new Date().toISOString();
-
-  try {
-    await apiRoot()
-      .customObjects()
-      .post({
-        body: {
-          container: `${storeKey}_product_sync`,
-          key: 'last_sync',
-          value: { syncedAt: now },
-        },
-      })
-      .execute();
-
-    logger.info(`✅ Delta sync timestamp updated: ${now}`);
-  } catch (err) {
-    logger.error('Failed to update sync timestamp');
-  }
-
-  return updatedProductProjections;
+  return results;
 }

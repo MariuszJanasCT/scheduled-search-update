@@ -2,8 +2,7 @@ import { Request, Response } from 'express';
 
 import CustomError from '../errors/custom.error';
 import { logger } from '../utils/logger.utils';
-import { allOrders } from '../orders/fetch.orders';
-import { fetchProductsUpdatedSince } from '../products/fetch.products';
+import { fetchRecentlyUpdatedProductsAcrossStores } from '../products/fetch.products';
 import { readConfiguration } from '../utils/config.utils';
 
 /**
@@ -16,9 +15,8 @@ import { readConfiguration } from '../utils/config.utils';
 export const post = async (_request: Request, response: Response) => {
   try {
     // Get the orders
-    const limitedOrdersObject = await fetchProductsUpdatedSince(
-      readConfiguration().storeKey
-    );
+    const limitedOrdersObject =
+      await fetchRecentlyUpdatedProductsAcrossStores();
     logger.info(`Exported ${limitedOrdersObject.length} products!`);
 
     response.status(200).send();
